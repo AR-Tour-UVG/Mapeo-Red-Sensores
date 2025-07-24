@@ -1,17 +1,14 @@
 #include <Wire.h>
 #include <U8g2lib.h>
-#include <WiFi.h>
+#include <DW3000.h>
 
-#define LED_PIN 2  // LED en pin digital 2
+#define LED_PIN 2
+#define PIN_RST 27
+#define PIN_IRQ 34
+#define PIN_SS 5
 
 U8G2_SH1106_128X64_NONAME_F_SW_I2C oled(U8G2_R0, /* clock=*/9, /* data=*/8, /* reset=*/U8X8_PIN_NONE);
-
-int currentNetwork = 0;
-int n = 0;
-unsigned long lastScan = 0;
-unsigned long lastChange = 0;
-const unsigned long scanInterval = 15000;
-const unsigned long displayInterval = 2500;
+DW3000Class DW;
 
 // Logo UVG (64x64 px aprox)
 const unsigned char uvg_logo [] PROGMEM = {
@@ -150,12 +147,12 @@ const unsigned char jack [] PROGMEM = {
 
 void showWelcomeMessage() {
   oled.clearBuffer();
-  oled.drawXBMP(0, 0, 128, 64, uvg_logo);  // Mostrar logo UVG centrado
+  oled.drawXBMP(0, 0, 128, 64, uvg_logo);  // Mostrar logo UVG
   oled.sendBuffer();
   delay(2000);
 
   oled.clearBuffer();
-  oled.drawXBMP(0, 0, 128, 64, jack);  // Mostrar jack centrado
+  oled.drawXBMP(0, 0, 128, 64, jack);  // Mostrar logo Jack
   oled.sendBuffer();
   delay(2000);
 
@@ -163,104 +160,78 @@ void showWelcomeMessage() {
   oled.setFont(u8g2_font_6x10_tr);
   oled.drawStr(0, 20, "Bienvenido al Sniffer");
   oled.drawStr(0, 35, "AR UVG TOUR");
-  oled.drawStr(0, 50, "ESP32 WiFi Scanner");
+  oled.drawStr(0, 50, "UWB Packet Listener");
   oled.sendBuffer();
   delay(2500);
-}
-
-String getEncryptionType(int enc) {
-  switch (enc) {
-    case WIFI_AUTH_OPEN: return "Open";
-    case WIFI_AUTH_WEP: return "WEP";
-    case WIFI_AUTH_WPA_PSK: return "WPA";
-    case WIFI_AUTH_WPA2_PSK: return "WPA2";
-    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA/WPA2";
-    case WIFI_AUTH_WPA2_ENTERPRISE: return "Enterprise";
-    default: return "Unknown";
-  }
-}
-
-void scanNetworks() {
-  // Parpadeo rápido mientras escanea
-  for (int i = 0; i < 6; i++) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(LED_PIN, LOW);
-    delay(100);
-  }
-
-  WiFi.scanDelete();
-  n = WiFi.scanNetworks(false, true);
-  currentNetwork = 0;
-
-  if (n > 0) {
-    digitalWrite(LED_PIN, HIGH);
-  } else {
-    digitalWrite(LED_PIN, LOW);
-  }
-}
-
-void updateScanIfNeeded() {
-  if (millis() - lastScan > scanInterval) {
-    scanNetworks();
-    lastScan = millis();
-  }
-}
-
-void updateDisplayIfNeeded() {
-  if (n == 0) {
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
-    oled.drawStr(0, 30, "No se detectaron redes");
-    oled.sendBuffer();
-    return;
-  }
-
-  if (millis() - lastChange > displayInterval) {
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_5x7_tf);
-
-    String ssid = WiFi.SSID(currentNetwork);
-    int rssi = WiFi.RSSI(currentNetwork);
-    int channel = WiFi.channel(currentNetwork);
-    int enc = WiFi.encryptionType(currentNetwork);
-    String encryption = getEncryptionType(enc);
-
-    oled.drawStr(0, 7, ("SSID: " + ssid).c_str());
-    oled.drawStr(0, 22, ("RSSI: " + String(rssi) + " dBm").c_str());
-    oled.drawStr(0, 37, ("CH: " + String(channel)).c_str());
-    oled.drawStr(0, 52, ("ENC: " + encryption).c_str());
-
-    String count = "Red " + String(currentNetwork + 1) + "/" + String(n);
-    oled.drawStr(0, 64, count.c_str());
-
-    oled.sendBuffer();
-
-    currentNetwork = (currentNetwork + 1) % n;
-    lastChange = millis();
-  }
 }
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
+  Serial.begin(115200);
+  delay(1000);
+
   Wire.begin(8, 9);
   oled.begin();
-  oled.setFont(u8g2_font_haxrcorp4089_t_cyrillic);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true);
-  delay(1000);
+  oled.setFont(u8g2_font_6x10_tr);
 
   showWelcomeMessage();
 
-  scanNetworks();
-  lastScan = millis();
-  lastChange = millis();
+  if (!DW.begin(PIN_SS, PIN_IRQ, PIN_RST)) {
+    oled.clearBuffer();
+    oled.drawStr(0, 30, "Error al iniciar DW3000");
+    oled.sendBuffer();
+    while (1);
+  }
+
+  DW.setDeviceAddress(1);
+  DW.setNetworkId(10);
+  DW.setAntennaDelay(16436);
+  DW.newReceive();
+  DW.receivePermanently(true);  // Sniffer mode
+
+  oled.clearBuffer();
+  oled.drawStr(0, 20, "Sniffer UWB Activo");
+  oled.drawStr(0, 40, "Esperando paquetes...");
+  oled.sendBuffer();
 }
 
 void loop() {
-  updateScanIfNeeded();
-  updateDisplayIfNeeded();
+  if (DW.isReceiveDone()) {
+    int len = DW.getDataLength();
+    byte data[len];
+    DW.getData(data, len);
+
+    digitalWrite(LED_PIN, HIGH);
+    delay(50);
+    digitalWrite(LED_PIN, LOW);
+
+    Serial.print("Paquete UWB recibido: ");
+    Serial.print(len);
+    Serial.println(" bytes");
+    Serial.print("Contenido (hex): ");
+    for (int i = 0; i < len; i++) {
+      Serial.print(data[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+
+    // Mostrar primeros bytes en OLED
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_5x7_tr);
+    oled.drawStr(0, 10, "Paquete UWB capturado");
+    oled.drawStr(0, 25, ("Tam: " + String(len) + " bytes").c_str());
+    oled.drawStr(0, 40, "Bytes:");
+
+    for (int i = 0; i < min(len, 8); i++) {
+      char hexChar[4];
+      sprintf(hexChar, "%02X", data[i]);
+      oled.drawStr(5 + (i * 14), 55, hexChar);
+    }
+
+    oled.sendBuffer();
+
+    DW.newReceive();  // Listo para el siguiente
+  }
 }
